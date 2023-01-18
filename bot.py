@@ -3,9 +3,11 @@
 from collections import OrderedDict
 import os
 from sqlite3 import IntegrityError
+from typing import Sequence
 from urllib.request import urlopen
 import discord
 import discord.ext
+from discord.ext import tasks
 from discord.ui import Button, View, Modal, InputText
 import orjson
 import sqlalchemy
@@ -16,6 +18,8 @@ from util.log import Log
 from util.db import DbGuild, DbInvite, DbUser, DbCategory, DbVerifyingUser, Base
 from util.ESPN_api import get_next_game_basketball
 from dateutil import parser, tz
+from util.emojis import sync_add, sync_delete, sync_name
+import datetime
 
 
 bot = discord.Bot(intents=discord.Intents.all())
@@ -108,6 +112,9 @@ user_to_assigned_invite = {}
 
 # Assigned roles associativity
 user_to_assigned_role = {}
+
+# Cache of emojis that were modified/deleted during a current synchronization
+synced_emoji_cache = set()
 
 # ------------------------------- CLASSES -------------------------------
 
@@ -394,6 +401,32 @@ class CommunitySelectView(discord.ui.View):
         )
         self.add_item(select_menu)
 
+class EmojiSyncView(discord.ui.View):
+    # Might be able to delete guild reference
+    def __init__(self, emoji, mod_type: str, old_emoji=None, *args, **kwargs):
+        super().__init__(timeout=None, *args, **kwargs)
+        self.emoji = emoji
+        self.old_emoji = old_emoji
+        
+        # Mod type will be a String of 'Add', 'Del', or 'Name' 
+        self.mod_type = mod_type
+
+    @discord.ui.button(label='Accept', style=discord.ButtonStyle.green)
+    async def accept_callback(self, button, interaction: discord.Interaction):
+        await interaction.response.edit_message(content='Okay! I will sync this now.', view=None, delete_after=LONG_DELETE_TIME)
+
+        # Do the operation
+        if self.mod_type == 'Add':
+            await sync_add(cache=synced_emoji_cache, bot=bot, emoji=self.emoji)
+        elif self.mod_type == 'Del':
+            await sync_delete(cache=synced_emoji_cache, bot=bot, emoji=self.emoji)
+        else:
+            await sync_name(cache=synced_emoji_cache, bot=bot, old_emoji=self.old_emoji, new_emoji=self.emoji)
+
+    @discord.ui.button(label='Deny', style=discord.ButtonStyle.red)
+    async def deny_callback(self, button, interaction: discord.Interaction):
+        # Do nothing!
+        await interaction.response.edit_message(content='Okay! This change will not be synced.', view=None, delete_after=LONG_DELETE_TIME)
 
 class UnsetupConfirmation(discord.ui.Modal):
     def __init__(self, *args, **kwargs):
@@ -455,6 +488,12 @@ class URLModal(Modal):
 
 
 class VerifyView(View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+        help_button = discord.ui.Button(label="Need Help?", style=discord.ButtonStyle.link, url="https://pitt.co1.qualtrics.com/jfe/form/SV_25Y15jZ9BmYYEf4")
+        self.add_item(help_button)
+
     @discord.ui.button(label="Verify", style=discord.ButtonStyle.green)
     async def verify_callback(self, button, interaction):
         await verify(interaction)
@@ -1035,7 +1074,7 @@ async def setup(ctx):
         print(int_exception.with_traceback())
 
     # Create a view that will contain a button which can be used to initialize the verification process
-    view = VerifyView(timeout=None)
+    view = VerifyView()
 
     await guild_to_landing[ctx.guild.id].send("Click below to verify.", view=view)
 
@@ -1605,10 +1644,13 @@ questions_and_answers = OrderedDict()
 
 # PLEASE KEEP KEYS IN ALPHABETICAL ORDER
 questions_and_answers["computer_labs"] = ">>> The hours of operation for the University's computing labs are located here: \nhttps://www.technology.pitt.edu/services/student-computing-labs"
-questions_and_answers["covid"] = ">>> Information about vaccines and Pitt campuses' current COVID-19 levels can be found here: \nhttps://www.coronavirus.pitt.edu/\n\nMasking indoors is **required** when your campus's community level is `High`."
+questions_and_answers["covid_masks"] = ">>> Information about vaccines and Pitt campuses' current COVID-19 levels can be found here: \nhttps://www.coronavirus.pitt.edu/\n\nMasking indoors is **required** when your campus's community level is `High`."
+questions_and_answers["covid_tests"] = ">>> If you are feeling symptomatic, please call student health at (412) 383-1800. They can schedule COVID-19 and flu testing for free.\nhttps://www.coronavirus.pitt.edu/testing-and-care/covid-19-testing-overview"
 questions_and_answers["dining_dollars"] = ">>> This is a list of off-campus vendors that accept Pitt Dining Dollars: \nhttps://dineoncampus.com/pitt/offcampus-vendors"
+questions_and_answers["dining_guest"] = ">>> All unlimited meal plans and some lifestyle memberships come with 5-10 `flex passes` per semester. These can be used to admit friends or family at the Eatery or purchase a meal swap.\nhttps://dineoncampus.com/pitt/all-about-meal-memberships"
 questions_and_answers["dining_hours"] = ">>> The hours of operation for campus eateries are located here: \nhttps://dineoncampus.com/pitt/hours-of-operation"
 questions_and_answers["library_hours"] = ">>> The hours of operation for University libraries are located here: \nhttps://www.library.pitt.edu/hours"
+questions_and_answers["maintenance"] = ">>> For urgent maintenance requests, please call Panther Central at (412) 648-1100\nFor all other requests, simply visit https://www.pc.pitt.edu/maintenance-requests and fill out the form."
 questions_and_answers["panther_funds"] = ">>> You can add Panther Funds to your Pitt account using this link: \nhttps://bit.ly/PowerYourPantherCard\n\nYou can also load funds and track the balance of all of your accounts by downloading the Transact eAccounts mobile app on iOS or Android."
 questions_and_answers["phone_numbers"] = ">>> These are some important phone numbers:\n\n**Panther Central:** 412-648-1100\n**Pitt Police Emergency Line:** 412-624-2121\n**Pitt Police Non-Emergency Line:** 412-624-4040\n**Pitt Student Health Services:** 412-383-1800\n**Pittsburgh Action Against Rape 24/7 Helpline:** 1-866-363-7273\n**resolve Crisis Services:** 1-888-796-8226\n**SafeRider:** 412-648-2255\n**University Counseling Center:** 412-648-7930"
 questions_and_answers["printing"] = ">>> You can upload print jobs at https://print.pitt.edu/. All you have to do is upload your file to the website and then choose the job settings at the bottom right.\n\nOnce your file is uploaded, simply go to a printer and swipe your Pitt ID. Remember, you must go to a color printer to print in color!\n\nA full list of University printers and their locations is available here: https://www.technology.pitt.edu/services/pitt-print#locations"
@@ -1906,7 +1948,73 @@ async def on_scheduled_event_delete(deleted_event):
     bot_commands = bot.get_channel(BOT_COMMANDS_ID)
     await bot_commands.send(f"Event **{deleted_event.name}** successfully canceled.")
 
-
+   
+# Announces cumulative events once per week on Monday at 8AM
+# Runs once every day at 8AM and cancels on non-Mondays
+@tasks.loop(time=datetime.time(hour=13))
+async def weekly_cumulative_event_announcement():
+    # Cancels the function if today's date isn't Monday
+    if datetime.date.today().weekday() != 0:
+        return
+    # Iterates through residence hall servers, skipping hub server
+    for guild in bot.guilds:
+        if guild.id == HUB_SERVER_ID:
+            continue
+        # Finds the @residents role
+        mention_string = ""
+        for role in guild.roles:
+            if role.name == 'residents':
+                mention_string = role.mention
+        # Creates an embed and iteratively appends fields for each event
+        link_embed = discord.Embed(title = "**Check out these upcoming events!**")
+        for scheduled_event in guild.scheduled_events:
+            if str(scheduled_event.status) == "ScheduledEventStatus.scheduled":
+                if len(scheduled_event.description) > 64:
+                    truncated_description = scheduled_event.description[:64] + '...'
+                else:
+                    truncated_description = scheduled_event.description
+                link_embed.add_field(name=scheduled_event.name,value=f"""{truncated_description}
+[Details]({scheduled_event.url})""")
+        # Finds the announcements channel and sends the embed message
+        for channel in guild.channels:
+            if channel.name == 'announcements':
+                await channel.send(content=mention_string,embed=link_embed)
+    
+    
+# Announces cumulative events manually via slash command
+@bot.slash_command(name="broadcast", description="Manually send a notification of events occuring within the next week.")
+async def broadcast(interaction: discord.Interaction):
+    # Cancels the command with a warning message if the user is not an administrator
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Administrator permissions required to run this command.", ephemeral=True)
+        return
+    # Iterates through residence hall servers, skipping hub server
+    for guild in bot.guilds:
+        if guild.id == HUB_SERVER_ID:
+            continue
+        # Finds the @residents role
+        mention_string = ""
+        for role in guild.roles:
+            if role.name == 'residents':
+                mention_string = role.mention
+        # Creates an embed and iteratively appends fields for each event
+        link_embed = discord.Embed(title = "**Check out these upcoming events!**")
+        for scheduled_event in guild.scheduled_events:
+            if str(scheduled_event.status) == "ScheduledEventStatus.scheduled":
+                if len(scheduled_event.description) > 64:
+                    truncated_description = scheduled_event.description[:64] + '...'
+                else:
+                    truncated_description = scheduled_event.description
+                link_embed.add_field(name=scheduled_event.name,value=f"""{truncated_description}
+[Details]({scheduled_event.url})""")
+        # Finds the announcements channel and sends the embed message
+        for channel in guild.channels:
+            if channel.name == 'announcements':
+                await channel.send(content=mention_string,embed=link_embed)
+    # Sends confirmation message in #bot-commands
+    await interaction.response.send_message("Cumulative scheduled event list successfully broadcast.")
+    
+    
 @bot.event
 async def on_member_join(member: discord.Member):
     # Need to figure out what invite the user joined with
@@ -2132,7 +2240,7 @@ async def on_guild_join(guild):
         print(int_exception.with_traceback())
 
     # Create a view that will contain a button which can be used to initialize the verification process
-    view = VerifyView(timeout=None)
+    view = VerifyView()
 
     # Finished
     # Delete old verification message
@@ -2207,6 +2315,125 @@ async def on_guild_channel_update(
                 f"Category {before.id} was updated but is not associated with a role in cache. This could be an error."
             )
 
+@bot.event
+async def on_guild_emojis_update(guild: discord.Guild, before: Sequence[discord.Emoji], after: Sequence[discord.Emoji]):
+    bot_commands = bot.get_channel(BOT_COMMANDS_ID)
+    hub = bot.get_guild(HUB_SERVER_ID)
+    hub_emojis = await hub.fetch_emojis()
+
+    # Determine if change was made in control server
+    changed_in_hub = guild.id == HUB_SERVER_ID
+
+    # Determine operation and execute
+
+    # Add
+    if len(before) < len(after):
+        emoji = discord.utils.find(lambda e: e not in before, after)
+        if not emoji:
+            Log.error('find() returned None on detected added emoji')
+            return
+
+        # Check that the change was not due to synchronization
+        if emoji in synced_emoji_cache:
+            try:
+                synced_emoji_cache.remove(emoji)
+            except KeyError:
+                Log.error(f'Detected {emoji.name} synced cache but remove() failed')
+            return
+        
+        # Automatically sync throughout all guilds if made in control
+        if changed_in_hub:
+            await bot_commands.send(content=f'Synching {emoji.name}, {emoji}, across Guilds', delete_after=LONG_DELETE_TIME)
+            await sync_add(cache=synced_emoji_cache, bot=bot, emoji=emoji)            
+            
+        # Send View and wait for acceptance or denial
+        else:
+            # Send the view in the commands server
+            await bot_commands.send(
+                f'An emoji, {emoji.name} with the appearence {emoji} has been added to Guild {guild.name} Would you like to sync this change?', 
+                view=EmojiSyncView(emoji=emoji, mod_type='Add')
+            )
+
+    # Delete
+    elif len(before) > len(after):
+        emoji = discord.utils.find(lambda e: e not in after, before)
+        if not emoji:
+            Log.error('find() returned None on detected deleted emoji')
+            return
+
+        # Check that the change was not due to synchronization
+        if emoji in synced_emoji_cache:
+            try:
+                synced_emoji_cache.remove(emoji)
+            except KeyError:
+                Log.error(f'Detected {emoji.name} synced cache but remove() failed')
+            return
+        
+        # Auto-sync
+        if changed_in_hub:
+            await bot_commands.send(content=f'Synching deletion of {emoji.name}, {emoji}, across all Guilds', delete_after=LONG_DELETE_TIME)
+            await sync_delete(cache=synced_emoji_cache, bot=bot, emoji=emoji)
+            
+        # Send View and wait for acceptance or denial
+        else:
+            # Check that the emoji is a synced emoji among guild
+            synced = False
+            for hub_emoji in hub_emojis:
+                if hub_emoji.name == emoji.name:
+                    synced = True
+                    break
+            
+            # If the emoji is a synced emoji, send the View, else we do not have to do anything
+            if synced:
+                await bot_commands.send(
+                            f'An emoji, {emoji.name} with the appearence {emoji} has been deleted from Guild {guild.name}, Would you like to sync this change?',
+                            view=EmojiSyncView(emoji=emoji, mod_type='Del')
+                        )
+
+    # Rename
+    else:
+        # Find out what emoji changed
+        old_emoji = None
+        new_emoji = None
+        for pre_emoji in before:
+            for post_emoji in after:
+                if pre_emoji == post_emoji and pre_emoji.name != post_emoji.name:
+                    old_emoji = pre_emoji
+                    new_emoji = post_emoji
+                    break
+
+        # Confirm that we found a name change, if not log an error
+        if not old_emoji or not new_emoji:
+            Log.error('Registered emoji name change but no change found')
+            return
+
+        # Check that the change was not due to synchronization
+        if old_emoji in synced_emoji_cache:
+            try:
+                synced_emoji_cache.remove(old_emoji)
+            except KeyError:
+                Log.error(f'Detected {old_emoji.name} in synced cache but remove() failed')
+            return
+
+        # Check if auto-sync is needed
+        if changed_in_hub:
+            await bot_commands.send(content=f'Syncing name change of {old_emoji.name} to {new_emoji.name} across all Guilds', delete_after=LONG_DELETE_TIME)
+            await sync_name(cache=synced_emoji_cache, bot=bot, old_emoji=old_emoji, new_emoji=new_emoji)
+
+        # Send view asking if the change should be synced
+        else:
+            synced = False
+            for hub_emoji in hub_emojis:
+                if hub_emoji.name == old_emoji.name:
+                    synced = True
+                    break
+            
+            # If the emoji is a synced emoji, send the View, else we do not have to do anything
+            if synced:
+                await bot_commands.send(
+                    f'An emojis name was changed from {old_emoji.name} to {new_emoji.name} in Guild {guild.name}. Would you like to sync this change?',
+                    view=EmojiSyncView(emoji=new_emoji, old_emoji=old_emoji, mod_type='Name')
+                )
 
 @bot.event
 async def on_application_command_error(
@@ -2226,6 +2453,9 @@ async def on_application_command_error(
 
 @bot.event
 async def on_ready():
+    # Start the loop of weekly cumulative event announcements
+    weekly_cumulative_event_announcement.start()
+    
     # Build a default invite cache
     for guild in bot.guilds:
         try:
@@ -2251,7 +2481,7 @@ async def on_ready():
         guild_to_landing[guild.id] = discord.utils.get(guild.channels, name="verify")
 
         # Create a view that will contain a button which can be used to initialize the verification process
-        view = VerifyView(timeout=None)
+        view = VerifyView()
 
         # Finished
         try:

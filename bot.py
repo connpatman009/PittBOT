@@ -14,6 +14,8 @@ from sqlalchemy.orm import sessionmaker
 import util.invites
 from util.log import Log
 from util.db import DbGuild, DbInvite, DbUser, DbCategory, DbVerifyingUser, Base
+from util.ESPN_api import get_next_game_basketball
+from dateutil import parser, tz
 
 
 bot = discord.Bot(intents=discord.Intents.all())
@@ -1566,6 +1568,35 @@ async def auto_link(ctx):
         message_content += f"\n{category_name}: {status}"
 
     await ctx.respond(content=message_content, ephemeral=True)
+
+
+@bot.slash_command(
+    description="See information about the next basketball game."
+)
+@discord.ext.commands.has_permissions(administrator=True)
+async def next_basketball_game(ctx):
+    # Get the next game information from the PittAPI
+    game = get_next_game_basketball()
+
+    if (game["valid"] == "false"):
+        # await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="No game scheduled."), status=discord.Status.online)
+        await ctx.respond("No game scheduled.")
+        return
+
+    iso8601_date = game["date_and_time"];                                   # Date is originally stored in the ISO 8601 format at UTC time zone
+    datetime_date = parser.parse(iso8601_date)                              # Converts from ISO 8601 to datetime
+    datetime_date = datetime_date.replace(tzinfo=tz.gettz("UTC"))           # Changes time zone from UTC to EST
+    datetime_date = datetime_date.astimezone(tz.gettz("America/New York"))
+    message_content = "The next basketball game is on {date} against the {opp_name}. The game will be played at the {location} in {city}, {state}.".format(
+        date=datetime_date.strftime("%m/%d/%Y at %I:%M %p"),
+        opp_name=game["opponent_name"],
+        location=game["location"]["fullName"],
+        city=game["location"]["address"]["city"],
+        state=game["location"]["address"]["state"]
+    )
+    # await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=message_content), status=discord.Status.online)
+    await ctx.respond(message_content)
+
 
 
 # initialize an ordered hashmap to store FAQs and their answers
